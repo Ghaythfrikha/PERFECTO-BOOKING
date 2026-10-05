@@ -4,9 +4,6 @@
 // jamais toucher aux autres données.
 import pg from "pg";
 import dotenv from "dotenv";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 dotenv.config();
 
@@ -14,7 +11,8 @@ const { Pool, types } = pg;
 types.setTypeParser(types.builtins.NUMERIC, (v) => (v === null ? null : parseFloat(v)));
 types.setTypeParser(types.builtins.INT8, (v) => (v === null ? null : parseInt(v, 10)));
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// Schémas intégrés (module JS) : aucun readFileSync, embarqués dans le bundle Vercel.
+import { SCHEMA_CORE, SCHEMA_DOCUMENTS, SCHEMA_FINANCE } from "./schemas.js";
 
 function resolveConnStr() {
   if (process.env.TEST_SCHEMA) {
@@ -112,8 +110,8 @@ export async function initDb() {
   if (migrated.has(key)) return;
   console.log(`Base PostgreSQL : ${hostForLogs(connStr)}${schema ? ` (schéma ${schema})` : ""}`);
   if (schema) await pool.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
-  for (const f of ["schema.sql", "schema_documents.sql", "schema_finance.sql"]) {
-    await pool.query(readFileSync(join(__dirname, f), "utf8"));
+  for (const sql of [SCHEMA_CORE, SCHEMA_DOCUMENTS, SCHEMA_FINANCE]) {
+    await pool.query(sql);
   }
   // Migrations de colonnes (bases créées avant leur ajout) — strictement additives.
   for (const [table, column, ddl] of [

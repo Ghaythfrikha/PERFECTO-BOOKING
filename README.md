@@ -102,13 +102,16 @@ src/application/       → projects.js : createProject, add/update/removeLine,
                          calculateProject, validateProject (transaction atomique,
                          recalcul serveur, snapshots historiques), cancelProject,
                          duplicateProject. Refuse toute modif d'un projet VALIDE/ANNULE.
-src/infrastructure/db/ → schema.sql + database.js (PostgreSQL via `pg` : Pool,
-                         NUMERIC(12,3) parsé en nombre, SSL Supabase, migrations
-                         idempotentes, transactions), init.js (seed : rôles, directeur,
-                         clients, fournisseurs, articles, TVA 0/7/13/19)
+src/infrastructure/db/ → schemas.js (schémas SQL intégrés au JS : Vercel n'embarque
+                         pas les `.sql` lus via `readFileSync`) + database.js (PostgreSQL
+                         via `pg` : Pool, NUMERIC(12,3) parsé en nombre, SSL distant,
+                         migrations idempotentes, transactions), init.js (seed : rôles,
+                         directeur, clients, fournisseurs, articles, TVA 0/7/13/19)
 src/presentation/api/  → server.js (REST + JWT + bcrypt, référentiels, projets,
-                         tableau de bord) + web/ (index.html, styles.css, app.js —
-                         UI 100 % française, responsive, design system ERP dense)
+                         tableau de bord) + public/ (index.html, styles.css, app.js —
+                         UI 100 % française, responsive, design system ERP dense ;
+                         servi en statique pur par Vercel, par Express en local/Render)
+                         + api/index.js (entrée serverless Vercel, aucune logique métier)
 tests/pricing.test.js  → nominaux (100+20%=120, 120+15%=138, 20×138=2760, TVA),
                          limites (quantité/prix négatifs, marge zéro, arrondis,
                          TVA invalide), machine à états

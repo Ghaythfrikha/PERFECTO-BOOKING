@@ -20,7 +20,9 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "poc-erp-secret-change-me";
 
 app.use(express.json());
-app.use(express.static(join(__dirname, "web")));
+// Frontend : dossier public/ à la racine (servi en statique pur par Vercel,
+// par Express en local/Render).
+app.use(express.static(join(__dirname, "..", "..", "..", "public")));
 
 function sign(user) {
   return jwt.sign({ id: user.id, email: user.email, name: user.full_name, role: user.role_code }, JWT_SECRET, { expiresIn: "12h" });
@@ -433,8 +435,8 @@ function messageFr(e) {
   return "Enregistrement impossible, vérifiez les champs";
 }
 
-// SPA fallback
-app.get(/^\/(?!api).*/, (req, res) => res.sendFile(join(__dirname, "web", "index.html")));
+// SPA fallback (local/Render ; sur Vercel le statique public/ répond avant la fonction)
+app.get(/^\/(?!api).*/, (req, res) => res.sendFile(join(__dirname, "..", "..", "..", "public", "index.html")));
 
 export default app;
 
