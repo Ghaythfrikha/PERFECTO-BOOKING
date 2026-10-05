@@ -6,12 +6,39 @@ protégée, référentiels clients / fournisseurs / articles / TVA.
 
 ## Démarrage
 
+## Démarrage (PostgreSQL / Supabase)
+
+1. Créez **2 projets gratuits** sur Supabase (base réelle + base de tests) :
+   Dashboard Supabase → New Project (×2).
+2. Pour chaque projet : Project Settings → Database → **Connection string (URI)**
+   et copiez-la.
+3. Renseignez `.env` (jamais commité, voir `.gitignore`) :
+   `DATABASE_URL` = URI du projet réel, `TEST_DATABASE_URL` = URI du projet de test.
+   Format : `postgresql://postgres:[MOT-DE-PASSE]@db.[REF].supabase.co:5432/postgres`
+4. Puis :
+
 ```powershell
 npm install
-npm run init-db   # crée data/erp.db + compte directeur
-npm test          # 21 tests (pricing, documents, états)
+npm run init-db   # crée le schéma + compte directeur sur Supabase
+npm test          # 42 tests (schémas de test isolés, jamais la base réelle)
 npm start         # http://localhost:3000
 ```
+
+## Déploiement Vercel (frontend + API, base Supabase)
+
+Le projet est prêt pour Vercel : `api/index.js` expose l'app Express en serverless,
+`vercel.json` route tout vers elle, `.vercelignore` exclut l'ancienne base locale.
+
+1. `npm i -g vercel` puis `vercel` dans le dossier (suivez l'assistant, Hobby gratuit).
+2. Variables d'environnement Vercel (Settings → Environment Variables) :
+   - `DATABASE_URL` = **URI pooler** Supabase (port `6543`, mode transaction) :
+     `postgresql://postgres.[REF]:[MOT-DE-PASSE]@aws-0-[REGION].pooler.supabase.com:6543/postgres`
+   - `PGPOOL_MAX` = `2` (instances serverless éphémères)
+   - `JWT_SECRET` = chaîne longue et aléatoire
+3. `npm run init-db` **une fois** en local avec `DATABASE_URL` pointant sur Supabase
+   (crée le schéma + le compte directeur), puis `vercel --prod`.
+4. Limites connues (Hobby) : cold start ~1 s occasionnel, timeout de fonction
+   adapté aux PDF et requêtes courantes ; rien à changer dans le code métier.
 
 Compte PoC : `directeur@agence.tn` / `Directeur123!`
 
@@ -75,9 +102,10 @@ src/application/       → projects.js : createProject, add/update/removeLine,
                          calculateProject, validateProject (transaction atomique,
                          recalcul serveur, snapshots historiques), cancelProject,
                          duplicateProject. Refuse toute modif d'un projet VALIDE/ANNULE.
-src/infrastructure/db/ → schema.sql, database.js (SQLite ; Postgres futur : REAL→NUMERIC(12,3)),
-                         init.js (seed : rôles, directeur, clients, fournisseurs,
-                         articles, TVA 0/7/13/19)
+src/infrastructure/db/ → schema.sql + database.js (PostgreSQL via `pg` : Pool,
+                         NUMERIC(12,3) parsé en nombre, SSL Supabase, migrations
+                         idempotentes, transactions), init.js (seed : rôles, directeur,
+                         clients, fournisseurs, articles, TVA 0/7/13/19)
 src/presentation/api/  → server.js (REST + JWT + bcrypt, référentiels, projets,
                          tableau de bord) + web/ (index.html, styles.css, app.js —
                          UI 100 % française, responsive, design system ERP dense)
@@ -98,6 +126,9 @@ tests/pricing.test.js  → nominaux (100+20%=120, 120+15%=138, 20×138=2760, TVA
 
 ## Décisions PoC (isolées, réversibles)
 
-- SQLite (WAL) au lieu de Postgres — repositories prêts pour migration.
+- PostgreSQL hébergé (Supabase) : `DATABASE_URL` pour l'app, `TEST_DATABASE_URL`
+  (2ᵉ projet gratuit) + `TEST_SCHEMA` par fichier pour les tests, sans jamais
+  toucher la base réelle. L'ancien fichier local `data/erp.db` n'est plus utilisé
+  (conservé tel quel sur disque, aucune donnée effacée).
 - Référence auto `P-AAAA-NNNN`.
 - Auth JWT + rôles extensibles (`roles`), un seul utilisateur seedé.

@@ -3,6 +3,7 @@
 // (marges = vente − coût, statuts dérivés, reçu = Σ transactions par période).
 // Règles de filtres (§13) : chaque section n'applique que les filtres ayant un sens
 // pour elle (ex. le client ne filtre pas les données fournisseurs).
+// Persistance PostgreSQL : to_char pour les mois, ::date pour les périodes.
 import { getDb } from "../infrastructure/db/database.js";
 import { roundMoney } from "../domain/money.js";
 import { derivePaymentStatus } from "../domain/payments.js";
@@ -23,7 +24,7 @@ function sommeParMois(rows) {
   return map;
 }
 
-export function pilotage(filtres = {}) {
+export async function pilotage(filtres = {}) {
   const db = getDb();
   const auj = new Date().toISOString().slice(0, 10);
   const fin = filtres.fin || auj;
@@ -32,44 +33,45 @@ export function pilotage(filtres = {}) {
   const fournisseurId = filtres.fournisseurId ? Number(filtres.fournisseurId) : null;
   const categorieId = filtres.categorieId ? Number(filtres.categorieId) : null;
   const statut = filtres.statut || "";
+  const avecPeriode = Boolean(filtres.debut || filtres.fin);
 
   // ---- Projets : effectifs (filtres client + période sur la DATE D'ÉVÉNEMENT) ----
   const wp = [], pp = [];
-  if (clientId) { wp.push("p.customer_id=?"); pp.push(clientId); }
-  if (filtres.debut || filtres.fin) { wp.push("date(p.start_date) BETWEEN date(?) AND date(?)"); pp.push(debut, fin); }
+  if (clientId) { wp.push(`p.customer_id=$${pp.length + 1}`); pp.push(clientId); }
+  if (avecPeriode) { wp.push(`p.start_date::date BETWEEN $${pp.length + 1}::date AND $${pp.length + 2}::date`); pp.push(debut, fin); }
   const wClause = wp.length ? "WHERE " + wp.join(" AND ") : "";
-  const effectifs = db.prepare(`SELECT status, COUNT(*) c FROM projects p ${wClause} GROUP BY status`).all(...pp);
+  const effectifs = await db.all(`SELECT status, COUNT(*) c FROM projects p ${wClause} GROUP BY status`, ...pp);
   const nb = { BROUILLON: 0, VALIDE: 0, ANNULE: 0 };
   for (const r of effectifs) if (nb[r.status] !== undefined) nb[r.status] = r.c;
 
   const wAtt = [...wp];
-  if (statut) { wAtt.push("p.status=?"); }
+  if (statut) { wAtt.push(`p.status=$${pp.length + 1}`); }
   const pAtt = [...pp, ...(statut ? [statut] : [])];
   const attClause = wAtt.length ? "WHERE " + wAtt.join(" AND ") : "";
   const selBrouillon = `SELECT p.id, p.reference, p.title, c.name client, p.start_date, p.total_ttc,
     p.total_marge_notre_agence marge, (SELECT COUNT(*) FROM project_lines l WHERE l.project_id=p.id) nb_lignes
     FROM projects p JOIN customers c ON c.id=p.customer_id`;
   const brouillonsListe = statut
-    ? db.prepare(`${selBrouillon} ${attClause} ORDER BY p.updated_at DESC LIMIT 8`).all(...pAtt)
-    : db.prepare(`${selBrouillon} ${wClause} ${wClause ? "AND" : "WHERE"} p.status='BROUILLON'
-      ORDER BY p.updated_at DESC LIMIT 8`).all(...pp);
-  const margesNeg = db.prepare(`SELECT p.id, p.reference, p.title, c.name client, p.total_ht, p.total_marge_notre_agence marge
+    ? await db.all(`${selBrouillon} ${attClause} ORDER BY p.updated_at DESC LIMIT 8`, ...pAtt)
+    : await db.all(`${selBrouillon} ${wClause} ${wClause ? "AND" : "WHERE"} p.status='BROUILLON'
+      ORDER BY p.updated_at DESC LIMIT 8`, ...pp);
+  const margesNeg = await db.all(`SELECT p.id, p.reference, p.title, c.name client, p.total_ht, p.total_marge_notre_agence marge
     FROM projects p JOIN customers c ON c.id=p.customer_id
-    WHERE p.status='VALIDE' AND p.total_marge_notre_agence < 0 ${clientId ? "AND p.customer_id=?" : ""}
-    ORDER BY p.total_marge_notre_agence LIMIT 10`).all(...(clientId ? [clientId] : []));
+    WHERE p.status='VALIDE' AND p.total_marge_notre_agence < 0 ${clientId ? "AND p.customer_id=$1" : ""}
+    ORDER BY p.total_marge_notre_agence LIMIT 10`, ...(clientId ? [clientId] : []));
 
   // ---- CA mensuel (12 mois) : vendu = devis validés (mois de l'ÉVÉNEMENT), facturé = FV (émission), reçu = Σ transactions ----
   const cles = moisCles(fin);
   const d12 = `${cles[0]}-01`;
-  const venduRows = db.prepare(`SELECT strftime('%Y-%m', p.start_date) m, SUM(p.total_ht) s FROM projects p
-    WHERE p.status='VALIDE' AND date(p.start_date) >= date(?) ${clientId ? "AND p.customer_id=?" : ""}
-    ${categorieId ? "AND EXISTS (SELECT 1 FROM project_lines l JOIN articles a ON a.id=l.article_id WHERE l.project_id=p.id AND a.category_id=?)" : ""}
-    GROUP BY m`).all(d12, ...(clientId ? [clientId] : []), ...(categorieId ? [categorieId] : []));
-  const factureRows = db.prepare(`SELECT strftime('%Y-%m', f.issue_date) m, SUM(f.total_ht) s FROM sales_invoices f
-    WHERE f.status='VALIDEE' AND date(f.issue_date) >= date(?) ${clientId ? "AND f.customer_id=?" : ""} GROUP BY m`)
-    .all(d12, ...(clientId ? [clientId] : []));
-  const recuRows = db.prepare(`SELECT strftime('%Y-%m', r.transaction_date) m, SUM(r.amount_ht) s FROM received_transactions r
-    WHERE date(r.transaction_date) >= date(?) GROUP BY m`).all(d12);
+  const venduRows = await db.all(`SELECT to_char(p.start_date::timestamp, 'YYYY-MM') m, SUM(p.total_ht) s FROM projects p
+    WHERE p.status='VALIDE' AND p.start_date::date >= $1::date ${clientId ? "AND p.customer_id=$2" : ""}
+    ${categorieId ? `AND EXISTS (SELECT 1 FROM project_lines l JOIN articles a ON a.id=l.article_id WHERE l.project_id=p.id AND a.category_id=$${clientId ? 3 : 2})` : ""}
+    GROUP BY m`, d12, ...(clientId ? [clientId] : []), ...(categorieId ? [categorieId] : []));
+  const factureRows = await db.all(`SELECT to_char(f.issue_date::timestamp, 'YYYY-MM') m, SUM(f.total_ht) s FROM sales_invoices f
+    WHERE f.status='VALIDEE' AND f.issue_date::date >= $1::date ${clientId ? "AND f.customer_id=$2" : ""} GROUP BY m`,
+    d12, ...(clientId ? [clientId] : []));
+  const recuRows = await db.all(`SELECT to_char(r.transaction_date::timestamp, 'YYYY-MM') m, SUM(r.amount_ht) s FROM received_transactions r
+    WHERE r.transaction_date::date >= $1::date GROUP BY m`, d12);
   const mV = sommeParMois(venduRows), mF = sommeParMois(factureRows), mR = sommeParMois(recuRows);
   // Période personnalisée : seuls les mois demandés sont conservés (KPI cohérents).
   const mDebut = (filtres.debut || "").slice(0, 7);
@@ -79,13 +81,14 @@ export function pilotage(filtres = {}) {
 
   // ---- Factures d'achat : jamais de suivi "vente encaissée" (§5, §10) ----
   const wf = [], pf = [];
-  if (fournisseurId) { wf.push("f.supplier_id=?"); pf.push(fournisseurId); }
-  if (filtres.debut || filtres.fin) { wf.push("date(f.issue_date) BETWEEN date(?) AND date(?)"); pf.push(debut, fin); }
+  if (fournisseurId) { wf.push(`f.supplier_id=$${pf.length + 1}`); pf.push(fournisseurId); }
+  if (avecPeriode) { wf.push(`f.issue_date::date BETWEEN $${pf.length + 1}::date AND $${pf.length + 2}::date`); pf.push(debut, fin); }
   const fClause = wf.length ? "WHERE " + wf.join(" AND ") : "";
-  const soldes = db.prepare(`SELECT f.id, f.reference, f.supplier_name_snapshot fournisseur, f.project_reference projet,
+  const soldes = await db.all(`SELECT f.id, f.reference, f.supplier_name_snapshot fournisseur, f.project_reference projet,
     f.issue_date, f.total_ht, f.total_ttc, COALESCE(SUM(p.amount_ttc),0) paye
     FROM purchase_invoices f LEFT JOIN supplier_payments p ON p.purchase_invoice_id=f.id
-    ${fClause} ${fClause ? "AND" : "WHERE"} f.status='VALIDEE' GROUP BY f.id`).all(...pf);
+    ${fClause} ${fClause ? "AND" : "WHERE"} f.status='VALIDEE'
+    GROUP BY f.id, f.reference, f.supplier_name_snapshot, f.project_reference, f.issue_date, f.total_ht, f.total_ttc`, ...pf);
   let faHt = 0, faTtc = 0, faPaye = 0, nonPayees = 0, partielles = 0, soldees = 0;
   const aSurveiller = [];
   for (const r of soldes) {
@@ -98,47 +101,54 @@ export function pilotage(filtres = {}) {
   aSurveiller.sort((a, b) => b.reste - a.reste);
 
   // ---- Tops ----
-  const topFournisseurs = db.prepare(`SELECT f.supplier_id id, f.supplier_name_snapshot nom,
+  const tp = [];
+  if (fournisseurId) tp.push(fournisseurId);
+  if (avecPeriode) tp.push(debut, fin);
+  const topFournisseurs = (await db.all(`SELECT f.supplier_id id, f.supplier_name_snapshot nom,
     SUM(f.total_ttc) total, COALESCE((SELECT SUM(p.amount_ttc) FROM supplier_payments p
       JOIN purchase_invoices f2 ON f2.id=p.purchase_invoice_id WHERE f2.supplier_id=f.supplier_id AND f2.status='VALIDEE'),0) paye
-    FROM purchase_invoices f WHERE f.status='VALIDEE' ${fournisseurId ? "AND f.supplier_id=?" : ""}
-    ${filtres.debut || filtres.fin ? "AND date(f.issue_date) BETWEEN date(?) AND date(?)" : ""}
-    GROUP BY f.supplier_id ORDER BY total DESC LIMIT 5`)
-    .all(...(fournisseurId ? [fournisseurId] : []), ...((filtres.debut || filtres.fin) ? [debut, fin] : []))
+    FROM purchase_invoices f WHERE f.status='VALIDEE' ${fournisseurId ? `AND f.supplier_id=$1` : ""}
+    ${avecPeriode ? `AND f.issue_date::date BETWEEN $${fournisseurId ? 2 : 1}::date AND $${fournisseurId ? 3 : 2}::date` : ""}
+    GROUP BY f.supplier_id, f.supplier_name_snapshot ORDER BY total DESC LIMIT 5`, ...tp))
     .map((r) => ({ ...r, total: roundMoney(r.total), paye: roundMoney(r.paye), reste: roundMoney(r.total - r.paye) }));
-  const topClients = db.prepare(`SELECT * FROM (SELECT c.id, c.name nom,
+  const tcp = [];
+  if (avecPeriode) tcp.push(debut, fin);
+  if (avecPeriode) tcp.push(debut, fin);
+  if (clientId) tcp.push(clientId);
+  const topClients = (await db.all(`SELECT * FROM (SELECT c.id, c.name nom,
     COALESCE((SELECT SUM(p.total_ttc) FROM projects p WHERE p.customer_id=c.id AND p.status='VALIDE'
-      ${filtres.debut || filtres.fin ? "AND date(p.start_date) BETWEEN date(?) AND date(?)" : ""}),0) vendu,
+      ${avecPeriode ? `AND p.start_date::date BETWEEN $${tcp.indexOf(debut) + 1}::date AND $${tcp.indexOf(debut) + 2}::date` : ""}),0) vendu,
     COALESCE((SELECT SUM(f.total_ttc) FROM sales_invoices f WHERE f.customer_id=c.id AND f.status='VALIDEE'
-      ${filtres.debut || filtres.fin ? "AND date(f.issue_date) BETWEEN date(?) AND date(?)" : ""}),0) facture
-    FROM customers c WHERE c.is_active=1 ${clientId ? "AND c.id=?" : ""})
-    WHERE vendu > 0 OR facture > 0 ORDER BY vendu DESC LIMIT 5`).all(...(() => {
-      const a = [];
-      if (filtres.debut || filtres.fin) a.push(debut, fin);
-      if (filtres.debut || filtres.fin) a.push(debut, fin);
-      if (clientId) a.push(clientId);
-      return a;
-    })()).map((r) => ({ ...r, vendu: roundMoney(r.vendu), facture: roundMoney(r.facture) }));
+      ${avecPeriode ? `AND f.issue_date::date BETWEEN $${tcp.indexOf(debut) + 3}::date AND $${tcp.indexOf(debut) + 4}::date` : ""}),0) facture
+    FROM customers c WHERE c.is_active=1 ${clientId ? `AND c.id=$${tcp.length}` : ""})
+    WHERE vendu > 0 OR facture > 0 ORDER BY vendu DESC LIMIT 5`, ...tcp))
+    .map((r) => ({ ...r, vendu: roundMoney(r.vendu), facture: roundMoney(r.facture) }));
 
   // ---- CA par catégorie (lignes des projets validés) ----
-  const catRows = db.prepare(`SELECT COALESCE(cat.label,'Sans catégorie') categorie, SUM(l.quantity * l.prix_vente_notre_agence) ht
+  const cp = [];
+  if (clientId) cp.push(clientId);
+  if (avecPeriode) cp.push(debut, fin);
+  if (categorieId) cp.push(categorieId);
+  const catRows = await db.all(`SELECT COALESCE(cat.label,'Sans catégorie') categorie, SUM(l.quantity * l.prix_vente_notre_agence) ht
     FROM project_lines l JOIN projects p ON p.id=l.project_id
     LEFT JOIN articles a ON a.id=l.article_id LEFT JOIN article_categories cat ON cat.id=a.category_id
-    WHERE p.status='VALIDE' ${clientId ? "AND p.customer_id=?" : ""}
-    ${filtres.debut || filtres.fin ? "AND date(p.start_date) BETWEEN date(?) AND date(?)" : ""}
-    ${categorieId ? "AND a.category_id=?" : ""}
-    GROUP BY categorie ORDER BY ht DESC LIMIT 8`)
-    .all(...(clientId ? [clientId] : []), ...((filtres.debut || filtres.fin) ? [debut, fin] : []), ...(categorieId ? [categorieId] : []));
+    WHERE p.status='VALIDE' ${clientId ? `AND p.customer_id=$${cp.indexOf(clientId) + 1}` : ""}
+    ${avecPeriode ? `AND p.start_date::date BETWEEN $${cp.indexOf(debut) + 1}::date AND $${cp.indexOf(debut) + 2}::date` : ""}
+    ${categorieId ? `AND a.category_id=$${cp.indexOf(categorieId) + 1}` : ""}
+    GROUP BY categorie ORDER BY ht DESC LIMIT 8`, ...cp);
   const catTotal = catRows.reduce((t, r) => t + (r.ht || 0), 0);
   const caParCategorie = catRows.map((r) => ({ categorie: r.categorie, ht: roundMoney(r.ht || 0),
     part: catTotal > 0 ? Math.round(((r.ht || 0) / catTotal) * 1000) / 10 : 0 }));
 
   // ---- Rentabilité : CA − coût = marge (montant ; aucun taux inventé, §9) ----
-  const rentRows = db.prepare(`SELECT p.id, p.reference, p.title, c.name client, p.total_ht ca, p.total_achat_notre_agence cout,
+  const rp = [];
+  if (clientId) rp.push(clientId);
+  if (avecPeriode) rp.push(debut, fin);
+  const rentRows = await db.all(`SELECT p.id, p.reference, p.title, c.name client, p.total_ht ca, p.total_achat_notre_agence cout,
     p.total_marge_notre_agence marge FROM projects p JOIN customers c ON c.id=p.customer_id
-    WHERE p.status='VALIDE' ${clientId ? "AND p.customer_id=?" : ""}
-    ${filtres.debut || filtres.fin ? "AND date(p.start_date) BETWEEN date(?) AND date(?)" : ""}
-    ORDER BY p.total_marge_notre_agence DESC`).all(...(clientId ? [clientId] : []), ...((filtres.debut || filtres.fin) ? [debut, fin] : []));
+    WHERE p.status='VALIDE' ${clientId ? `AND p.customer_id=$${rp.indexOf(clientId) + 1}` : ""}
+    ${avecPeriode ? `AND p.start_date::date BETWEEN $${rp.indexOf(debut) + 1}::date AND $${rp.indexOf(debut) + 2}::date` : ""}
+    ORDER BY p.total_marge_notre_agence DESC`, ...rp);
   const rentabilite = {
     totalMarge: roundMoney(rentRows.reduce((t, r) => t + (r.marge || 0), 0)),
     top: rentRows.slice(0, 5).map((r) => ({ ...r, ca: roundMoney(r.ca), cout: roundMoney(r.cout), marge: roundMoney(r.marge) })),
@@ -156,8 +166,8 @@ export function pilotage(filtres = {}) {
   if (partielles > 0) alertes.push({ niveau: "info", libelle: `${partielles} facture(s) partiellement payée(s)`, detail: "Suivi des règlements", cible: { vue: "factures", onglet: "achat" } });
 
   // ---- Activité récente (audit existant, aucun second système, §11) ----
-  const acts = db.prepare(`SELECT a.entity, a.action, a.payload, a.created_at, u.email auteur
-    FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 15`).all();
+  const acts = await db.all(`SELECT a.entity, a.action, a.payload, a.created_at, u.email auteur
+    FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 15`);
   const LIB = { project: "Projet", purchase_order: "Commande d'achat", sales_invoice: "Facture de vente",
     purchase_invoice: "Facture d'achat", received_transaction: "Encaissement", supplier_payment: "Paiement fournisseur" };
   const ACT = { CREATED: "créé", GENERATED: "généré", VALIDATED: "validé", CONFIRMED: "confirmé", CANCELLED: "annulé",

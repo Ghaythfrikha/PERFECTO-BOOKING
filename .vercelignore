@@ -1,0 +1,3 @@
+# Exclu du déploiement Vercel : ancienne base locale, jamais utilisée en production.
+data/
+*.db
