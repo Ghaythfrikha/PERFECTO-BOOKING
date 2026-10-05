@@ -30,9 +30,21 @@ function resolveConnStr() {
 }
 
 function sslFor(connStr) {
+  // SSL partout sauf en local explicite : Supabase, Neon et tout hébergeur distant l'exigent.
   if (/sslmode=disable/.test(connStr)) return undefined;
-  if (/supabase\.co|sslmode=require/.test(connStr)) return { rejectUnauthorized: false };
-  return undefined;
+  try {
+    const host = new URL(connStr.replace(/^postgresql:\/\//, "http://")).hostname;
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") return undefined;
+  } catch { /* URL inanalysable : SSL par sécurité */ }
+  return { rejectUnauthorized: false };
+}
+
+function hostForLogs(connStr) {
+  try {
+    return new URL(connStr.replace(/^postgresql:\/\//, "http://")).host;
+  } catch {
+    return "?";
+  }
 }
 
 class Db {
@@ -98,6 +110,7 @@ export async function initDb() {
     poolKey = key;
   }
   if (migrated.has(key)) return;
+  console.log(`Base PostgreSQL : ${hostForLogs(connStr)}${schema ? ` (schéma ${schema})` : ""}`);
   if (schema) await pool.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
   for (const f of ["schema.sql", "schema_documents.sql", "schema_finance.sql"]) {
     await pool.query(readFileSync(join(__dirname, f), "utf8"));
